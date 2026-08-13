@@ -1,0 +1,76 @@
+name: Validate patched WebUI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-patched-webui-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out automation repository
+        uses: actions/checkout@v6
+        with:
+          path: automation
+
+      - name: Check out upstream master
+        uses: actions/checkout@v6
+        with:
+          repository: ShokoAnime/Shoko-WebUI
+          ref: master
+          path: upstream
+          fetch-depth: 1
+
+      - name: Validate shell and workflow files
+        working-directory: automation
+        run: |
+          set -Eeuo pipefail
+          bash -n scripts/*.sh
+          shellcheck scripts/*.sh
+          if command -v actionlint >/dev/null 2>&1; then
+            actionlint
+          else
+            echo 'actionlint is not installed; shell and CI validation continue'
+          fi
+
+      - name: Apply and verify the patch
+        working-directory: automation
+        run: |
+          set -Eeuo pipefail
+          ./scripts/check-upstream-fix.sh ../upstream
+          git -C ../upstream apply --3way --check "$PWD/patches/series-image-preferred.patch"
+          git -C ../upstream apply --3way "$PWD/patches/series-image-preferred.patch"
+          ./scripts/verify-patched.sh ../upstream
+          git -C ../upstream diff --check
+
+      - name: Install pnpm 11
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11
+          run_install: false
+
+      - name: Install Node.js 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: upstream/pnpm-lock.yaml
+
+      - name: Install WebUI dependencies
+        working-directory: upstream
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check, lint, and build
+        working-directory: upstream
+        run: |
+          pnpm tscheck
+          pnpm lint --quiet
+          pnpm build

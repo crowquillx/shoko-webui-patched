@@ -1,0 +1,128 @@
+diff --git a/src/core/react-query/series/mutations.ts b/src/core/react-query/series/mutations.ts
+index 35d0ea5..72f4b38 100644
+--- a/src/core/react-query/series/mutations.ts
++++ b/src/core/react-query/series/mutations.ts
+@@ -8,6 +8,7 @@ import type {
+   DeleteSeriesRequestType,
+   RefreshAniDBSeriesRequestType,
+   RefreshSeriesAniDBInfoRequestType,
++  SetPreferredSeriesImageRequestType,
+   UploadSeriesImageRequestType,
+   WatchSeriesEpisodesRequestType,
+ } from '@/core/react-query/series/types';
+@@ -126,6 +127,26 @@ export const useRelocateSeriesFilesMutation = (seriesId: number) =>
+     onSuccess: () => toast.success('Series files renamed/moved!'),
+   });
+ 
++export const useSetPreferredSeriesImageMutation = (seriesId: number) =>
++  useMutation({
++    mutationFn: ({ imageId, imageSource, imageType }: SetPreferredSeriesImageRequestType) =>
++      axios.put(`Series/${seriesId}/Images/${imageType}`, { ID: imageId, Source: imageSource }),
++    onSuccess: () => {
++      invalidateQueries(['image-management', 'cross-references', seriesId]);
++      invalidateQueries(['series', seriesId, 'data']);
++    },
++  });
++
++export const useUnsetPreferredSeriesImageMutation = (seriesId: number) =>
++  useMutation({
++    mutationFn: (imageType: SetPreferredSeriesImageRequestType['imageType']) =>
++      axios.delete(`Series/${seriesId}/Images/${imageType}`),
++    onSuccess: () => {
++      invalidateQueries(['image-management', 'cross-references', seriesId]);
++      invalidateQueries(['series', seriesId, 'data']);
++    },
++  });
++
+ export const useUploadSeriesImageMutation = () =>
+   useMutation({
+     mutationFn: async ({ file, imageType, seriesId }: UploadSeriesImageRequestType) => {
+diff --git a/src/core/react-query/series/types.ts b/src/core/react-query/series/types.ts
+index fed492d..c891983 100644
+--- a/src/core/react-query/series/types.ts
++++ b/src/core/react-query/series/types.ts
+@@ -1,6 +1,6 @@
+ import type { IncludeOnlyFilterType } from '@/core/react-query/types';
+ import type { PaginationType } from '@/core/types/api';
+-import type { DataSourceType } from '@/core/types/api/common';
++import type { DataSourceType, ImageSourceType } from '@/core/types/api/common';
+ import type { EpisodeTypeEnum } from '@/core/types/api/episode';
+ import type { CrossReferenceImageType } from '@/core/types/api/image';
+ 
+@@ -68,6 +68,12 @@ export type RefreshSeriesAniDBInfoRequestType = {
+   cacheOnly?: boolean;
+ };
+ 
++export type SetPreferredSeriesImageRequestType = {
++  imageId: string;
++  imageSource: ImageSourceType;
++  imageType: CrossReferenceImageType;
++};
++
+ export type UploadSeriesImageRequestType = {
+   file: File;
+   imageType: CrossReferenceImageType;
+diff --git a/src/pages/collection/series/SeriesImages.tsx b/src/pages/collection/series/SeriesImages.tsx
+index 41c4ad6..834ae35 100644
+--- a/src/pages/collection/series/SeriesImages.tsx
++++ b/src/pages/collection/series/SeriesImages.tsx
+@@ -14,13 +14,12 @@ import ConfirmationPromptModal from '@/components/Dialogs/ConfirmationPromptModa
+ import Button from '@/components/Input/Button';
+ import MultiStateButton from '@/components/Input/MultiStateButton';
+ import ShokoPanel from '@/components/Panels/ShokoPanel';
+-import {
+-  useDeleteImageCrossReferenceMutation,
+-  useSetPreferredImageMutation,
+-  useUnsetPreferredImageMutation,
+-} from '@/core/react-query/image-management/mutations';
++import { useDeleteImageCrossReferenceMutation } from '@/core/react-query/image-management/mutations';
+ import { useSeriesImageCrossReferencesQuery } from '@/core/react-query/image-management/queries';
+-import { invalidateQueries } from '@/core/react-query/queryClient';
++import {
++  useSetPreferredSeriesImageMutation,
++  useUnsetPreferredSeriesImageMutation,
++} from '@/core/react-query/series/mutations';
+ import toast from '@/core/toast';
+ import { pxPerRem } from '@/core/util';
+ import useFlattenListResult from '@/hooks/useFlattenListResult';
+@@ -74,8 +73,8 @@ const SeriesImages = () => {
+   const [selectedImage, setSelectedImage] = useState<ImageCrossReferenceType | null>(null);
+   const imageLabel = tabType.slice(0, -1);
+ 
+-  const { mutate: setPreferred } = useSetPreferredImageMutation();
+-  const { mutate: unsetPreferred } = useUnsetPreferredImageMutation();
++  const { mutate: setPreferred } = useSetPreferredSeriesImageMutation(series.IDs.ID);
++  const { mutate: unsetPreferred } = useUnsetPreferredSeriesImageMutation(series.IDs.ID);
+   const { mutateAsync: deleteImage } = useDeleteImageCrossReferenceMutation();
+   const [showUploadModal, toggleUploadModal] = useToggle(false);
+   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+@@ -87,16 +86,25 @@ const SeriesImages = () => {
+   const handleTogglePreferredImage = () => {
+     if (!selectedImage) return;
+     const isPreferred = selectedImage.IsPreferred;
+-    const mutate = isPreferred ? unsetPreferred : setPreferred;
+     const action = isPreferred ? 'unset' : 'set';
+-    mutate(selectedImage.ID, {
++    const options = {
+       onSuccess: () => {
+-        invalidateQueries(['series']);
+         toast.success(`Preferred ${imageLabel} has been ${action}.`);
+         setSelectedImage(null);
+       },
+       onError: () => toast.error(`Failed to ${action} preferred ${imageLabel}.`),
+-    });
++    };
++
++    if (isPreferred) {
++      unsetPreferred(selectedImage.ImageType, options);
++      return;
++    }
++
++    setPreferred({
++      imageId: selectedImage.ImageID,
++      imageSource: selectedImage.ImageSource,
++      imageType: selectedImage.ImageType,
++    }, options);
+   };
+ 
+   const handleDeleteImage = async () => {

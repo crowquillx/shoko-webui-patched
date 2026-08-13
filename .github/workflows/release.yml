@@ -1,0 +1,266 @@
+name: Build patched WebUI
+
+on:
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: patched-webui-release
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPOSITORY: ShokoAnime/Shoko-WebUI
+  PATCH_FILE: ${{ github.workspace }}/automation/patches/series-image-preferred.patch
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out automation repository
+        uses: actions/checkout@v6
+        with:
+          path: automation
+          fetch-depth: 1
+
+      - name: Check out upstream master
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.UPSTREAM_REPOSITORY }}
+          ref: master
+          path: upstream
+          fetch-depth: 1
+
+      - name: Resolve the exact upstream master commit
+        id: upstream
+        working-directory: upstream
+        run: |
+          set -Eeuo pipefail
+          git fetch --no-tags origin master --depth=1
+          git checkout --detach FETCH_HEAD
+          commit=$(git rev-parse HEAD)
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "Upstream master: $commit"
+
+      - name: Fail if upstream made this patch obsolete
+        run: automation/scripts/check-upstream-fix.sh upstream
+
+      - name: Skip an upstream commit that already has a release
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_COMMIT: ${{ steps.upstream.outputs.commit }}
+        run: |
+          set -Eeuo pipefail
+          marker="Source commit: $UPSTREAM_COMMIT"
+          release=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            | jq -c --arg marker "$marker" 'flatten | map(select((.body // "") | contains($marker))) | first // empty')
+          if [[ -n "$release" ]]; then
+            echo 'skip=true' >> "$GITHUB_OUTPUT"
+            echo "tag=$(jq -r '.tag_name' <<<"$release")" >> "$GITHUB_OUTPUT"
+            echo "A release already exists for $UPSTREAM_COMMIT; release creation will be skipped."
+          else
+            echo 'skip=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Apply the patch with three-way support
+        if: steps.existing.outputs.skip != 'true'
+        run: |
+          set -Eeuo pipefail
+          if ! git -C upstream apply --3way "$PATCH_FILE"; then
+            git -C upstream diff --name-only --diff-filter=U || true
+            echo 'error: patch application failed; no release was published' >&2
+            exit 1
+          fi
+          automation/scripts/verify-patched.sh upstream
+          git -C upstream diff --check
+
+      - name: Install pnpm 11
+        if: steps.existing.outputs.skip != 'true'
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11
+          run_install: false
+
+      - name: Install Node.js 24
+        if: steps.existing.outputs.skip != 'true'
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: upstream/pnpm-lock.yaml
+
+      - name: Install WebUI dependencies
+        if: steps.existing.outputs.skip != 'true'
+        working-directory: upstream
+        run: pnpm install --frozen-lockfile
+
+      - name: Check the patched WebUI
+        if: steps.existing.outputs.skip != 'true'
+        working-directory: upstream
+        run: |
+          pnpm tscheck
+          pnpm lint --quiet
+          pnpm build
+
+      - name: Create the flat WebUI archive and checksum
+        if: steps.existing.outputs.skip != 'true'
+        id: package
+        working-directory: upstream
+        env:
+          UPSTREAM_COMMIT: ${{ steps.upstream.outputs.commit }}
+        run: |
+          set -Eeuo pipefail
+          base_version=$(node -p "require('./package.json').version.replace(/-.*/, '')")
+          if [[ ! "$base_version" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+            echo "error: package version is not System.Version-compatible: $base_version" >&2
+            exit 1
+          fi
+          version="${base_version}-dev.${GITHUB_RUN_NUMBER}"
+          min_server_version=$(node -p "require('./dist/version.json').minimumServerVersion")
+          patch_sha=$(sha256sum "$PATCH_FILE" | cut -d ' ' -f 1)
+          asset_name="Shoko-WebUI-v${version}.zip"
+          mkdir -p "$GITHUB_WORKSPACE/build"
+          (
+            cd dist
+            zip -q -r "$GITHUB_WORKSPACE/build/$asset_name" . -x '*.map' '**/*.map'
+          )
+          if unzip -Z1 "$GITHUB_WORKSPACE/build/$asset_name" | grep -E '\.map$' >/dev/null; then
+            echo 'error: the WebUI archive contains a source map' >&2
+            exit 1
+          fi
+          checksum="sha256:$(sha256sum "$GITHUB_WORKSPACE/build/$asset_name" | cut -d ' ' -f 1)"
+          download_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${version}/${asset_name}"
+          printf 'Patched Shoko WebUI build.\n\nSource commit: %s\nPatch: %s\nMinimum Server Version: **%s**\n' \
+            "$UPSTREAM_COMMIT" "$patch_sha" "$min_server_version" > "$GITHUB_WORKSPACE/build/release-notes.txt"
+          {
+            echo "version=$version"
+            echo "asset_name=$asset_name"
+            echo "checksum=$checksum"
+            echo "download_url=$download_url"
+            echo "min_server_version=$min_server_version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create the GitHub prerelease
+        if: steps.existing.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          tag="v${{ steps.package.outputs.version }}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "error: release $tag already exists; refusing to overwrite it" >&2
+            exit 1
+          fi
+          gh release create "$tag" \
+            "$GITHUB_WORKSPACE/build/${{ steps.package.outputs.asset_name }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "Patched WebUI ${{ steps.package.outputs.version }}" \
+            --notes-file "$GITHUB_WORKSPACE/build/release-notes.txt"
+
+      - name: Resolve release metadata
+        if: success()
+        id: release-info
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SKIP_RELEASE: ${{ steps.existing.outputs.skip }}
+          EXISTING_TAG: ${{ steps.existing.outputs.tag }}
+          BUILT_VERSION: ${{ steps.package.outputs.version }}
+          BUILT_DOWNLOAD_URL: ${{ steps.package.outputs.download_url }}
+          BUILT_CHECKSUM: ${{ steps.package.outputs.checksum }}
+          BUILT_MIN_SERVER_VERSION: ${{ steps.package.outputs.min_server_version }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/build"
+          if [[ "$SKIP_RELEASE" == 'true' ]]; then
+            release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$EXISTING_TAG")
+            version=${EXISTING_TAG#v}
+            jq -r '.body // ""' <<<"$release" > "$GITHUB_WORKSPACE/build/release-notes.txt"
+            asset=$(jq -c --arg name "Shoko-WebUI-v${version}.zip" '.assets[] | select(.name == $name)' <<<"$release")
+            [[ -n "$asset" ]] || { echo 'error: existing release has no expected ZIP asset' >&2; exit 1; }
+            download_url=$(jq -r '.browser_download_url' <<<"$asset")
+            checksum=$(jq -r '.digest // empty' <<<"$asset")
+            min_server_version=$(sed -n 's/.*Minimum Server Version: \*\*\([^*]*\)\*\*.*/\1/p' <<<"$(jq -r '.body // ""' <<<"$release")" | head -1)
+            [[ "$checksum" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo 'error: existing release has no SHA256 digest' >&2; exit 1; }
+            [[ -n "$min_server_version" ]] || { echo 'error: existing release has no minimum server version' >&2; exit 1; }
+          else
+            version=$BUILT_VERSION
+            download_url=$BUILT_DOWNLOAD_URL
+            checksum=$BUILT_CHECKSUM
+            min_server_version=$BUILT_MIN_SERVER_VERSION
+          fi
+          {
+            echo "version=$version"
+            echo "download_url=$download_url"
+            echo "checksum=$checksum"
+            echo "min_server_version=$min_server_version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check whether the metadata branch exists
+        if: success()
+        id: metadata-ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/metadata" >/dev/null 2>&1; then
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'exists=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out metadata branch
+        if: success() && steps.metadata-ref.outputs.exists == 'true'
+        uses: actions/checkout@v6
+        with:
+          ref: metadata
+          path: metadata
+          fetch-depth: 0
+
+      - name: Initialize metadata branch
+        if: success() && steps.metadata-ref.outputs.exists != 'true'
+        run: |
+          set -Eeuo pipefail
+          git init -b metadata metadata
+          git -C metadata remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
+
+      - name: Configure metadata git identity
+        if: success()
+        run: |
+          set -Eeuo pipefail
+          git -C metadata config user.name github-actions[bot]
+          git -C metadata config user.email 41898282+github-actions[bot]@users.noreply.github.com
+
+      - name: Update and validate the metadata manifest
+        if: success()
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          python3 automation/scripts/update-manifest.py metadata/manifest.json \
+            --version "${{ steps.release-info.outputs.version }}" \
+            --commit "${{ steps.upstream.outputs.commit }}" \
+            --tag "v${{ steps.release-info.outputs.version }}" \
+            --download-url "${{ steps.release-info.outputs.download_url }}" \
+            --checksum "${{ steps.release-info.outputs.checksum }}" \
+            --min-server-version "${{ steps.release-info.outputs.min_server_version }}" \
+            --release-notes "$GITHUB_WORKSPACE/build/release-notes.txt" \
+            --keep 30
+          python3 automation/scripts/validate-manifest.py metadata/manifest.json --repository "$REPOSITORY"
+
+      - name: Publish the metadata branch
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          gh auth setup-git
+          git -C metadata add manifest.json
+          git -C metadata commit -m "Update patched WebUI manifest" \
+            || { test -z "$(git -C metadata status --porcelain)"; exit 0; }
+          git -C metadata push origin HEAD:metadata
