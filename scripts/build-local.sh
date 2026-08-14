@@ -26,14 +26,32 @@ upstream_commit=$(git -C "$webui_dir" rev-parse HEAD)
 git -C "$webui_dir" apply --3way "$patch_file"
 "$root_dir/scripts/verify-patched.sh" "$webui_dir"
 
+base_version=$(node -p "require('$webui_dir/package.json').version.replace(/-.*/, '')")
+if [[ ! "$base_version" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+  printf 'error: package version is not System.Version-compatible: %s\n' "$base_version" >&2
+  exit 1
+fi
+local_number=${LOCAL_BUILD_NUMBER:-$(date -u +%s)}
+if [[ ! "$local_number" =~ ^[0-9]+$ ]]; then
+  printf 'error: LOCAL_BUILD_NUMBER is not numeric: %s\n' "$local_number" >&2
+  exit 1
+fi
+version="${base_version}-dev.${local_number}"
+node - "$version" "$webui_dir/package.json" <<'NODE'
+const fs = require('node:fs');
+const [version, packagePath] = process.argv.slice(2);
+const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+packageJson.version = version;
+fs.writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
+NODE
+[[ "$(node -p "require('$webui_dir/package.json').version")" == "$version" ]]
+
 pnpm --dir "$webui_dir" install --frozen-lockfile
 pnpm --dir "$webui_dir" tscheck
 pnpm --dir "$webui_dir" lint --quiet
 pnpm --dir "$webui_dir" build
+python3 "$root_dir/scripts/validate-build.py" "$webui_dir/dist" --version "$version"
 
-base_version=$(node -p "require('$webui_dir/package.json').version.replace(/-.*/, '')")
-local_number=${LOCAL_BUILD_NUMBER:-$(date -u +%s)}
-version="${base_version}-dev.${local_number}"
 min_server_version=$(node -p "require('$webui_dir/dist/version.json').minimumServerVersion")
 asset="$output_dir/Shoko-WebUI-v${version}.zip"
 mkdir -p -- "$output_dir"
@@ -46,6 +64,7 @@ if unzip -Z1 "$asset" | grep -E '\.map$' >/dev/null; then
   printf 'error: the WebUI archive contains a source map\n' >&2
   exit 1
 fi
+python3 "$root_dir/scripts/validate-build.py" "$asset" --version "$version"
 checksum="sha256:$(sha256sum "$asset" | cut -d ' ' -f 1)"
 notes="$work_dir/release-notes.txt"
 printf 'Patched Shoko WebUI local build.\n\nSource commit: %s\nPatch: %s\nMinimum Server Version: **%s**\n' \

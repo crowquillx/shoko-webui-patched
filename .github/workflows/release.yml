@@ -78,6 +78,34 @@ jobs:
           automation/scripts/verify-patched.sh upstream
           git -C upstream diff --check
 
+      - name: Set the published WebUI version before building
+        if: steps.existing.outputs.skip != 'true'
+        id: version
+        working-directory: upstream
+        run: |
+          set -Eeuo pipefail
+          base_version=$(node -p "require('./package.json').version.replace(/-.*/, '')")
+          if [[ ! "$base_version" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+            echo "error: package version is not System.Version-compatible: $base_version" >&2
+            exit 1
+          fi
+          if [[ ! "$GITHUB_RUN_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "error: GitHub run number is not numeric: $GITHUB_RUN_NUMBER" >&2
+            exit 1
+          fi
+          version="${base_version}-dev.${GITHUB_RUN_NUMBER}"
+          node - "$version" <<'NODE'
+          const fs = require('node:fs');
+          const [version] = process.argv.slice(2);
+          const packagePath = 'package.json';
+          const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+          packageJson.version = version;
+          fs.writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`);
+          NODE
+          [[ "$(node -p "require('./package.json').version")" == "$version" ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Published WebUI version: $version"
+
       - name: Install pnpm 11
         if: steps.existing.outputs.skip != 'true'
         uses: pnpm/action-setup@v6
@@ -101,10 +129,13 @@ jobs:
       - name: Check the patched WebUI
         if: steps.existing.outputs.skip != 'true'
         working-directory: upstream
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
           pnpm tscheck
           pnpm lint --quiet
           pnpm build
+          python3 "$GITHUB_WORKSPACE/automation/scripts/validate-build.py" dist --version "$RELEASE_VERSION"
 
       - name: Create the flat WebUI archive and checksum
         if: steps.existing.outputs.skip != 'true'
@@ -112,14 +143,10 @@ jobs:
         working-directory: upstream
         env:
           UPSTREAM_COMMIT: ${{ steps.upstream.outputs.commit }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -Eeuo pipefail
-          base_version=$(node -p "require('./package.json').version.replace(/-.*/, '')")
-          if [[ ! "$base_version" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
-            echo "error: package version is not System.Version-compatible: $base_version" >&2
-            exit 1
-          fi
-          version="${base_version}-dev.${GITHUB_RUN_NUMBER}"
+          version=$RELEASE_VERSION
           min_server_version=$(node -p "require('./dist/version.json').minimumServerVersion")
           patch_sha=$(sha256sum "$PATCH_FILE" | cut -d ' ' -f 1)
           asset_name="Shoko-WebUI-v${version}.zip"
@@ -132,6 +159,8 @@ jobs:
             echo 'error: the WebUI archive contains a source map' >&2
             exit 1
           fi
+          python3 "$GITHUB_WORKSPACE/automation/scripts/validate-build.py" \
+            "$GITHUB_WORKSPACE/build/$asset_name" --version "$version"
           checksum="sha256:$(sha256sum "$GITHUB_WORKSPACE/build/$asset_name" | cut -d ' ' -f 1)"
           download_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${version}/${asset_name}"
           printf 'Patched Shoko WebUI build.\n\nSource commit: %s\nPatch: %s\nMinimum Server Version: **%s**\n' \

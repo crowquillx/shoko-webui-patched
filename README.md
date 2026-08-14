@@ -54,6 +54,8 @@ The default release repository is `crowquillx/shoko-webui-patched`. Use
 
 The local manifest contains GitHub release URLs for the selected repository.
 It is a verification artifact and is not published by the local script.
+Both release and local builds set the published version before `pnpm build` and
+validate the version in `version.json` and the production JavaScript bundle.
 
 ## Rollback
 
@@ -94,6 +96,7 @@ Do not weaken the obsolete-fix check to keep this workaround running.
 - `scripts/build-local.sh` — local reproduction and artifact build.
 - `scripts/update-manifest.py` — atomic manifest update with history retention.
 - `scripts/validate-manifest.py` — Shoko manifest validation.
+- `scripts/validate-build.py` — built version metadata and bundle validation.
 
 The release workflow uses only the repository `GITHUB_TOKEN`. It requests
 `contents: write` because it creates a release and updates `metadata`; CI uses
