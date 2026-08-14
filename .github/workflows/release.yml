@@ -15,6 +15,7 @@ concurrency:
 env:
   UPSTREAM_REPOSITORY: ShokoAnime/Shoko-WebUI
   PATCH_FILE: ${{ github.workspace }}/automation/patches/series-image-preferred.patch
+  RELEASE_FORMAT: embedded-version-v1
 
 jobs:
   release:
@@ -56,8 +57,10 @@ jobs:
         run: |
           set -Eeuo pipefail
           marker="Source commit: $UPSTREAM_COMMIT"
+          format_marker="Release format: $RELEASE_FORMAT"
           release=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-            | jq -c --arg marker "$marker" 'flatten | map(select((.body // "") | contains($marker))) | first // empty')
+            | jq -c --arg marker "$marker" --arg format_marker "$format_marker" \
+              'flatten | map(select((.body // "") | contains($marker) and contains($format_marker))) | first // empty')
           if [[ -n "$release" ]]; then
             echo 'skip=true' >> "$GITHUB_OUTPUT"
             echo "tag=$(jq -r '.tag_name' <<<"$release")" >> "$GITHUB_OUTPUT"
@@ -163,8 +166,8 @@ jobs:
             "$GITHUB_WORKSPACE/build/$asset_name" --version "$version"
           checksum="sha256:$(sha256sum "$GITHUB_WORKSPACE/build/$asset_name" | cut -d ' ' -f 1)"
           download_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${version}/${asset_name}"
-          printf 'Patched Shoko WebUI build.\n\nSource commit: %s\nPatch: %s\nMinimum Server Version: **%s**\n' \
-            "$UPSTREAM_COMMIT" "$patch_sha" "$min_server_version" > "$GITHUB_WORKSPACE/build/release-notes.txt"
+          printf 'Patched Shoko WebUI build.\n\nSource commit: %s\nRelease format: %s\nPatch: %s\nMinimum Server Version: **%s**\n' \
+            "$UPSTREAM_COMMIT" "$RELEASE_FORMAT" "$patch_sha" "$min_server_version" > "$GITHUB_WORKSPACE/build/release-notes.txt"
           {
             echo "version=$version"
             echo "asset_name=$asset_name"
