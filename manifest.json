@@ -2,14 +2,14 @@
   "Stable": [],
   "Dev": [
     {
-      "version": "2.6.0-dev.1",
+      "version": "2.6.0-dev.3",
       "minServerVersion": "6.0.0-dev.401",
-      "downloadUrl": "https://github.com/crowquillx/shoko-webui-patched/releases/download/v2.6.0-dev.1/Shoko-WebUI-v2.6.0-dev.1.zip",
-      "checksum": "sha256:c4957c2670b6e76d1e4b49be76357139172fa0f066e76e6a33196fed4d4711d2",
-      "releaseNotes": "Patched Shoko WebUI build.\n\nSource commit: e963cede52863d60d51d938e6c581d9b976aedc4\nPatch: 154d0f72f0b7e087a6ed0fe69e48b300ce1bb34b5e40fb28576f32a2021ee616\nMinimum Server Version: **6.0.0-dev.401**\n\n",
+      "downloadUrl": "https://github.com/crowquillx/shoko-webui-patched/releases/download/v2.6.0-dev.3/Shoko-WebUI-v2.6.0-dev.3.zip",
+      "checksum": "sha256:fe9511e6e7eb4ea62355a29b87cb0b39acc025fbadc180aa00939c3319200d00",
+      "releaseNotes": "Patched Shoko WebUI build.\n\nSource commit: e963cede52863d60d51d938e6c581d9b976aedc4\nRelease format: embedded-version-v1\nPatch: 154d0f72f0b7e087a6ed0fe69e48b300ce1bb34b5e40fb28576f32a2021ee616\nMinimum Server Version: **6.0.0-dev.401**\n",
       "commit": "e963cede52863d60d51d938e6c581d9b976aedc4",
-      "tag": "v2.6.0-dev.1",
-      "date": "2026-08-13T23:16:07.963975Z"
+      "tag": "v2.6.0-dev.3",
+      "date": "2026-08-14T00:36:31.693538Z"
     }
   ]
 }
